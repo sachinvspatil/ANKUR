@@ -2,23 +2,101 @@ import streamlit as st
 import base64
 import hashlib
 import pandas as pd
-import os
-# import gspread
-# from oauth2client.service_account import ServiceAccountCredentials
+import uuid
+from supabase import create_client, Client
 
-
+# Supabase configuration
+SUPABASE_URL = st.secrets["supabase"]["url"]
+SUPABASE_KEY = st.secrets["supabase"]["key"]
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # ------------------ Utility ------------------
+def hash_password(pw):
+    return hashlib.sha256(pw.encode()).hexdigest()
+
 def get_image_base64(image_path):
     with open(image_path, "rb") as img_file:
         return base64.b64encode(img_file.read()).decode()
 
-# ------------------ UI Config ------------------
-st.set_page_config(page_icon="logo.png", layout="wide")
+# ------------------ Supabase Table Setup ------------------
+# Table: alumni_users (id, name, phone, batch, year_of_passout, email, address, profession, password_hash, active)
+# Table: user_sessions_ankur (id, email, session_token, active)
 
+# ------------------ User Management ------------------
+def save_user(name, phone, batch, year, email, address, profession, password_hash, active=True):
+    email = email.lower()
+    supabase.table("alumni_users").insert({
+        "name": name,
+        "phone": phone,
+        "batch": batch,
+        "year_of_passout": year,
+        "email": email,
+        "address": address,
+        "profession": profession,
+        "password_hash": password_hash,
+        "active": active
+    }).execute()
+
+def user_exists(email):
+    email = email.lower()
+    res = supabase.table("alumni_users").select("id").eq("email", email).execute()
+    return len(res.data) > 0
+
+def validate_login(email, password):
+    pw_hash = hash_password(password)
+    email = email.lower()
+    res = supabase.table("alumni_users").select("password_hash,active").eq("email", email).execute()
+    if not res.data:
+        return False, "User not found. Please register."
+    user = res.data[0]
+    if user["password_hash"] != pw_hash:
+        return False, "Incorrect password."
+    if not user["active"]:
+        return False, "Account not activated. Please contact admin."
+    return True, "Login successful."
+
+def activate_user(email, active=True):
+    email = email.lower()
+    supabase.table("alumni_users").update({"active": active}).eq("email", email).execute()
+
+def delete_user(email):
+    email = email.lower()
+    supabase.table("alumni_users").delete().eq("email", email).execute()
+
+def load_users():
+    res = supabase.table("alumni_users").select("name,phone,batch,year_of_passout,email,address,profession,active").execute()
+    return pd.DataFrame(res.data)
+
+# ------------------ Session Management ------------------
+def is_user_logged_in(email, session_token=None):
+    email = email.lower()
+    res = supabase.table("user_sessions_ankur").select("session_token,active").eq("email", email).eq("active", True).execute()
+    if not res.data:
+        return False
+    if session_token:
+        return res.data[0]["session_token"] == session_token
+    return True
+
+def set_user_session(email, active=True, session_token=None):
+    email = email.lower()
+    if active:
+        if not session_token:
+            session_token = str(uuid.uuid4())
+        res = supabase.table("user_sessions_ankur").select("id").eq("email", email).execute()
+        if res.data:
+            session_id = res.data[0]["id"]
+            supabase.table("user_sessions_ankur").update({"active": True, "session_token": session_token}).eq("id", session_id).execute()
+        else:
+            supabase.table("user_sessions_ankur").insert({"email": email, "active": True, "session_token": session_token}).execute()
+        return session_token
+    else:
+        supabase.table("user_sessions_ankur").update({"active": False, "session_token": None}).eq("email", email).execute()
+        return None
+
+# ------------------ UI Config ------------------
+st.set_page_config(page_title="ANKUR - JNVK Alumni", page_icon="logo.png", layout="wide")
 image_path = "logo.png"
 image_base64 = get_image_base64(image_path)
-
 st.markdown(
     f"""
     <style>
@@ -37,315 +115,164 @@ st.markdown(
     </style>
     <div class="header">
         <img src="data:image/png;base64,{image_base64}" alt="Logo">
-        <h1>CET SELECT</h1>
+        <h1>ANKUR – JNVK Alumni</h1>
     </div>
-    <div class="copyright">© 2025 OptionGuru. All rights reserved.</div>
+    <div class="copyright">© 2025 ANKUR. All rights reserved.</div>
     """,
     unsafe_allow_html=True,
 )
 
+# ------------------ Login/Register UI ------------------
+def is_valid_email(email):
+    import re
+    return re.match(r"^[\w\.-]+@[\w\.-]+\.\w+$", email) is not None
 
+def login_register_ui():
+    # Load external CSS for styling
+    with open("ankur_style.css") as f:
+        st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
+    # Place tabs directly in the main area for full width
+    tab1, tab2 = st.tabs(["🔑 Login", "🆕 Register"])
+    with tab1:
+        st.markdown('<div class="ankur-logo"><img src="data:image/png;base64,' + get_image_base64("logo.png") + '" /></div>', unsafe_allow_html=True)
+        st.markdown('<div class="ankur-title">Welcome to ANKUR</div>', unsafe_allow_html=True)
+        st.markdown('<div class="ankur-sub">JNVK Alumni Portal Login</div>', unsafe_allow_html=True)
+        username = st.text_input("✉️ Email", key="login_user")
+        password = st.text_input("🔒 Password", type="password", key="login_pw")
+        if st.button("Login", key="login_btn"):
+            if is_user_logged_in(username) and not is_user_logged_in(username, st.session_state.get("session_token")):
+                st.error("This user is already logged in from another device or session.")
+            else:
+                ok, msg = validate_login(username, password)
+                if ok:
+                    session_token = set_user_session(username, active=True)
+                    st.session_state.user = username
+                    st.session_state.session_token = session_token
+                    st.success(msg)
+                    st.rerun()
+                else:
+                    st.error(msg)
+        st.markdown('</div>', unsafe_allow_html=True)
+    with tab2:
+        st.markdown('<div class="ankur-logo"><img src="data:image/png;base64,' + get_image_base64("logo.png") + '" /></div>', unsafe_allow_html=True)
+        st.markdown('<div class="ankur-title">Register for ANKUR</div>', unsafe_allow_html=True)
+        st.markdown('<div class="ankur-sub">Create your alumni account</div>', unsafe_allow_html=True)
+        new_name = st.text_input("👤 Full Name", key="reg_name")
+        new_phone = st.text_input("📱 Phone Number", key="reg_phone")
+        new_batch = st.text_input("🏷️ Batch Number", key="reg_batch")
+        new_year = st.text_input("🎓 Year of Passout", key="reg_year")
+        new_email = st.text_input("✉️ Email", key="reg_user")
+        new_address = st.text_area("🏠 Address", key="reg_address")
+        new_profession = st.text_input("💼 Profession", key="reg_profession")
+        new_password = st.text_input("🔒 Choose Password", type="password", key="reg_pw")
+        if st.button("Register", key="register_btn"):
+            if not is_valid_email(new_email):
+                st.error("Please enter a valid email address.")
+            elif not new_phone or not new_phone.isdigit() or len(new_phone) < 10:
+                st.error("Please enter a valid phone number.")
+            elif user_exists(new_email):
+                st.error("Email already registered.")
+            elif not new_name or not new_password or not new_batch or not new_year or not new_profession:
+                st.error("All fields except address are required.")
+            else:
+                save_user(new_name, new_phone, new_batch, new_year, new_email, new_address, new_profession, hash_password(new_password), active=True)
+                st.success("Registration successful! You can now log in.")
+        st.markdown('</div>', unsafe_allow_html=True)
 
-# # 🌐 ========== Google Sheets Setup ==========
-# GSHEET_NAME = "kcet_users"
-# GSCOPE = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+# ------------------ Admin Panel ------------------
+ADMIN_USERNAME = st.secrets["admin"]["username"]
+ADMIN_PASSWORD = st.secrets["admin"]["password"]
 
-# # # Load credentials from Streamlit secrets or JSON
-# # if "gcp_service_account" in st.secrets:
-# #     creds = ServiceAccountCredentials.from_json_keyfile_dict(st.secrets["gcp_service_account"], GSCOPE)
-# # else:
-# #     creds = ServiceAccountCredentials.from_json_keyfile_name("creds.json", GSCOPE)
-
-# # Local use only: Load from creds.json
-# creds = ServiceAccountCredentials.from_json_keyfile_name("creds.json", GSCOPE)
-
-
-# gc = gspread.authorize(creds)
-# sheet = gc.open(GSHEET_NAME).sheet1
-
-# # ──========= Helper Functions =========─
-# def hash_password(pw):
-#     return hashlib.sha256(pw.encode()).hexdigest()
-
-# def load_users():
-#     return pd.DataFrame(sheet.get_all_records())
-
-# def add_user(username, password_hash):
-#     sheet.append_row([username, password_hash, False])
-
-# def activate_user(username, active=True):
-#     users = load_users().to_dict("records")
-#     for i, u in enumerate(users, start=2):
-#         if u["username"] == username:
-#             sheet.update_cell(i, 3, str(active))
-#             break
-
-# def validate_login(u, pw):
-#     df = load_users()
-#     row = df[df.username == u]
-#     if row.empty: return False, "User not found."
-#     if row.iloc[0]["password_hash"] != hash_password(pw): return False, "Incorrect password."
-#     if not str(row.iloc[0]["active"]).lower() in ["true","1"]: return False, "Account not activated."
-#     return True, "Login successful."
-
-# def register_user(u, pw):
-#     df = load_users()
-#     if u in df.username.values: return False, "Username exists."
-#     add_user(u, hash_password(pw))
-#     return True, "Registered! Complete payment via QR."
-
-# # ──========= UI Helpers =========─
-# def get_base64(path):
-#     return base64.b64encode(open(path,"rb").read()).decode()
-
-# logo_base64 = get_base64("logo.png")
-# qr_base64 = get_base64("upi_qr.png")
-
-# st.set_page_config(page_icon="logo.png", layout="wide")
-# st.markdown(f"""
-# <style>
-# .header {{ display:flex; align-items:center; }}
-# .header img {{ width:50px; }}
-# .header h1 {{ margin-left:10px; font-size:2rem; }}
-# .footer{{position:fixed;bottom:10px;left:50%;transform:translateX(-50%);font-size:14px;color:gray;}}
-# </style>
-# <div class="header"><img src="data:image/png;base64,{logo_base64}" alt=""><h1>CET SELECT</h1></div>
-# <div class="footer">© 2025 OptionGuru. All rights reserved.</div>
-# """, unsafe_allow_html=True)
-
-# # ──========= Authentication Flow =========─
-# def login_register_ui():
-#     st.title("🔐 User Portal")
-#     tab1, tab2 = st.tabs(["🔑 Login","🆕 Register"])
-#     with tab1:
-#         u = st.text_input("Username", key="l_u")
-#         pw = st.text_input("Password", type="password", key="l_pw")
-#         if st.button("Login"):
-#             ok, msg = validate_login(u, pw)
-#             st.success(msg) if ok else st.error(msg)
-#             if ok:
-#                 st.session_state.user = u
-#                 st.rerun()
-#     with tab2:
-#         u2 = st.text_input("Pick Username", key="r_u")
-#         pw2 = st.text_input("Pick Password", type="password", key="r_pw")
-#         if st.button("Register"):
-#             ok, msg = register_user(u2, pw2)
-#             st.success(msg) if ok else st.error(msg)
-#             if ok:
-#                 st.image(qr_base64, width=200, caption="Scan to pay")
-#                 st.info("Email admin after payment for activation")
-
-# # ──========= Admin Panel =========─
-# ADMIN_USERNAME = "admin"
-# ADMIN_PASSWORD = "supersecret"
-
-# def admin_login_ui():
-#     st.title("🛡️ Admin Access")
-#     u = st.text_input("Admin Username")
-#     pw = st.text_input("Admin Password", type="password")
-#     if st.button("Login as Admin"):
-#         if u == ADMIN_USERNAME and pw == ADMIN_PASSWORD:
-#             st.session_state.admin = True
-#             st.rerun()
-#         else:
-#             st.error("Invalid admin credentials")
-
-# def admin_panel():
-#     st.title("👥 Admin Dashboard")
-#     df = load_users()
-#     st.markdown(f"**Total Registered Users:** {len(df)}")
-#     act = df[df.active.astype(str).str.lower()=="true"]
-#     inact = df[df.active.astype(str).str.lower()!="true"]
-#     st.markdown(f"**• Active:** {len(act)} • **Inactive:** {len(inact)}")
-#     c1, c2 = st.columns(2)
-#     with c1:
-#         if st.button("Download Active"):
-#             st.download_button("CSV", act.to_csv(index=False), "active_users.csv", "text/csv")
-#     with c2:
-#         if st.button("Download Inactive"):
-#             st.download_button("CSV", inact.to_csv(index=False), "inactive_users.csv", "text/csv")
-#     st.markdown("---")
-#     st.subheader("Manage Account Status")
-#     for i,r in df.iterrows():
-#         cols = st.columns([3,1,1])
-#         cols[0].write(r["username"])
-#         cols[1].write("🟢" if str(r["active"]).lower()=="true" else "🔴")
-#         if str(r["active"]).lower()!="true":
-#             if cols[2].button("Activate", key=f"act_{r['username']}"):
-#                 activate_user(r["username"], True)
-#                 st.rerun()
-#         else:
-#             if cols[2].button("Deactivate", key=f"deact_{r['username']}"):
-#                 activate_user(r["username"], False)
-#                 st.rerun()
-#     if st.button("Logout Admin"):
-#         del st.session_state.admin
-#         st.rerun()
-
-# # ──========= Routing =========─
-# if st.sidebar.button("Admin Login"):
-#     st.session_state.show_admin_login = True
-
-# if st.session_state.get("show_admin_login"):
-#     admin_login_ui()
-# elif st.session_state.get("admin"):
-#     admin_panel()
-# elif "user" not in st.session_state:
-#     login_register_ui()
-# else:
-#     st.sidebar.success(f"Logged in: {st.session_state.user}")
-#     if st.sidebar.button("Logout"):
-#         del st.session_state.user
-#         st.rerun()
-    # st.header("🎓 KCET College Predictor")
-    # st.write("Your secure prediction space here.")
-
-
-st.title("🎓 Welcome to KCET College Predictor")
-#st.write("✅ This is the secure area of your app, visible only to activated users.")
-
-
-    
-@st.cache_data
-def load_cutoff_data():
-    df = pd.read_csv("cleaned_cutoff_data_latest.csv")
-    df.columns = df.columns.str.strip()  # Strip whitespace from column names
-    df["Cutoff Rank"] = pd.to_numeric(df["Cutoff Rank"], errors="coerce")
-    return df
-
-df = load_cutoff_data()
-
-# ------------------ Category Map ------------------
-category_map = {
-    "GM": "General Merit (Unreserved)", "GMK": "General Merit - Kannada Medium", "GMR": "General Merit - Rural",
-    "1G": "Category 1 - General", "1K": "Category 1 - Kannada Medium", "1R": "Category 1 - Rural",
-    "2AG": "Category 2A - General", "2AK": "Category 2A - Kannada Medium", "2AR": "Category 2A - Rural",
-    "2BG": "Category 2B - General", "2BK": "Category 2B - Kannada Medium", "2BR": "Category 2B - Rural",
-    "3AG": "Category 3A - General", "3AK": "Category 3A - Kannada Medium", "3AR": "Category 3A - Rural",
-    "3BG": "Category 3B - General", "3BK": "Category 3B - Kannada Medium", "3BR": "Category 3B - Rural",
-    "SCG": "SC - General", "SCK": "SC - Kannada Medium", "SCR": "SC - Rural",
-    "STG": "ST - General", "STK": "ST - Kannada Medium", "STR": "ST - Rural",
-}
-category_display = [f"{k} – {v}" for k, v in category_map.items()]
-
-# ------------------ Dropdown Options ------------------
-college_options = sorted(
-    df[['College Code', 'College Name']].drop_duplicates().apply(
-        lambda row: f"{row['College Code']} – {row['College Name']}", axis=1
-    ).tolist()
-)
-
-branch_options = sorted(
-    df[['Branch Code', 'Branch Name']].drop_duplicates().apply(
-        lambda row: f"{row['Branch Code']} – {row['Branch Name']}", axis=1
-    ).tolist()
-)
-
-location_options = sorted(df['Location'].dropna().unique().tolist())
-
-# ------------------ Tabs ------------------
-tab1, tab2 = st.tabs(["🏫 College & Branch Explorer", "🎯 Rank-Based Prediction"])
-
-# ------------------ TAB 1: Rank-Based ------------------
-with tab1:
-    with st.form("branch_form"):
-        st.markdown("### 🏫 Explore Colleges, Branches, Locations, Categories")
-
-        selected_branch = st.selectbox("💡 Optional: Filter by Branch", ["-- Any --"] + branch_options)
-        selected_college = st.selectbox("🏛️ Optional: Filter by College", ["-- Any --"] + college_options)
-        selected_category_display = st.selectbox("🎯 Optional: Filter by Category", ["-- Any --"] + sorted(category_display))
-        selected_location = st.selectbox("📍 Optional: Filter by Location", ["-- Any --"] + location_options)
-
-        branch_submit = st.form_submit_button("🔍 Show Results")
-
-    if branch_submit:
-        filtered_df = df.copy()
-
-        if selected_branch != "-- Any --":
-            branch_code = selected_branch.split(" – ")[0]
-            filtered_df = filtered_df[filtered_df["Branch Code"] == branch_code]
-
-        if selected_college != "-- Any --":
-            college_code = selected_college.split(" – ")[0]
-            filtered_df = filtered_df[filtered_df["College Code"] == college_code]
-
-        if selected_category_display != "-- Any --":
-            category_code = selected_category_display.split(" – ")[0]
-            filtered_df = filtered_df[filtered_df["Category"] == category_code]
-
-        if selected_location != "-- Any --":
-            filtered_df = filtered_df[filtered_df["Location"] == selected_location]
-
-        result_df = filtered_df[[
-            'College Code', 'College Name', 'Location',
-            'Branch Code', 'Branch Name',
-            'Category', 'Cutoff Rank'
-        ]].dropna().sort_values(by=["College Code", "Branch Code", "Cutoff Rank"])
-
-        st.subheader("📋 Available Branches and Cutoffs")
-        if not result_df.empty:
-            st.success(f"Found {len(result_df)} matching record(s).")
-            st.dataframe(result_df.reset_index(drop=True))
+def admin_login_ui():
+    st.title("🛡️ Admin Access")
+    u = st.text_input("Admin Username")
+    pw = st.text_input("Admin Password", type="password")
+    if st.button("Login as Admin"):
+        if u == ADMIN_USERNAME and pw == ADMIN_PASSWORD:
+            st.session_state.admin = True
+            st.session_state.show_admin_login = False
+            st.rerun()
         else:
-            st.warning("❌ No matching records found.")
+            st.error("Invalid admin credentials")
 
-# ------------------ TAB 2: College & Branch Explorer ------------------
-with tab2:
-    with st.form("rank_form"):
-        st.markdown("### 🔍 Search by Rank + Category")
-
-        col1, col2 = st.columns(2)
-        with col1:
-            rank = st.number_input("📈 Enter your KCET Rank", min_value=1, step=1)
-            selected_college = st.selectbox("🏛️ Optional: Filter by College", ["-- Any --"] + college_options)
-            selected_location = st.selectbox("📍 Optional: Filter by Location", ["-- Any --"] + location_options)
-        with col2:
-            selected_category_display = st.selectbox("🎯 Select your Category", sorted(category_display))
-            selected_branch = st.selectbox("💡 Optional: Filter by Branch", ["-- Any --"] + branch_options)
-
-        submit = st.form_submit_button("🔍 Find Colleges")
-
-    if submit:
-        filtered_df = df.copy()
-        category = selected_category_display.split(" – ")[0]
-
-        if selected_college != "-- Any --":
-            college_code = selected_college.split(" – ")[0]
-            filtered_df = filtered_df[filtered_df["College Code"] == college_code]
-
-        if selected_branch != "-- Any --":
-            branch_code = selected_branch.split(" – ")[0]
-            filtered_df = filtered_df[filtered_df["Branch Code"] == branch_code]
-
-        if selected_location != "-- Any --":
-            filtered_df = filtered_df[filtered_df["Location"] == selected_location]
-
-        tolerance = max(int(rank * 0.15), 500)
-        min_rank = max(rank - tolerance, 1)
-        max_rank = rank + tolerance
-
-        filtered_df = filtered_df[
-            (filtered_df["Category"] == category) &
-            (filtered_df["Cutoff Rank"].between(min_rank, max_rank))
-        ]
-
-        st.subheader("🎓 Eligible Colleges and Branches")
-        if not filtered_df.empty:
-            st.success(f"Found {len(filtered_df)} option(s) within ±{tolerance} ranks.")
-            st.dataframe(filtered_df.sort_values(by="Cutoff Rank").reset_index(drop=True))
+def admin_panel():
+    st.title("👥 Admin Dashboard")
+    df = load_users()
+    st.markdown(f"**Total Registered Alumni:** {len(df)}")
+    act = df[df.active.astype(str).str.lower()=="true"]
+    inact = df[df.active.astype(str).str.lower()!="true"]
+    st.markdown(f"**• Active:** {len(act)} • **Inactive:** {len(inact)}")
+    st.markdown("---")
+    st.subheader("Manage Account Status")
+    for i, r in df.iterrows():
+        cols = st.columns([3,2,1,1,1])
+        cols[0].write(r["email"])
+        cols[1].write(r.get("phone", "N/A"))
+        cols[2].write("🟢" if str(r["active"]).lower()=="true" else "🔴")
+        if str(r["active"]).lower()!="true":
+            if cols[3].button("Activate", key=f"act_{r['email']}"):
+                activate_user(r["email"], True)
+                st.rerun()
         else:
-            st.warning("❌ No eligible colleges found. Try adjusting your filters.")
+            if cols[3].button("Deactivate", key=f"deact_{r['email']}"):
+                activate_user(r["email"], False)
+                st.rerun()
+        if cols[4].button("Delete", key=f"del_{r['email']}"):
+            delete_user(r["email"])
+            st.rerun()
+    if st.button("Logout Admin"):
+        del st.session_state.admin
+        st.rerun()
 
+# ------------------ Main App Routing ------------------
+if st.session_state.get("show_admin_login"):
+    admin_login_ui()
+    st.stop()
 
-    # # ✅ Prepare pages dynamically
-    # pages = {
-    #     "Dashboards": [
-    #         st.Page("pages/kcet_predictor.py", title="kcet_predictor"),
-    #     ]
-    # }
+if st.session_state.get("admin"):
+    admin_panel()
+    st.stop()
 
+if "user" not in st.session_state:
+    login_register_ui()
+    st.stop()
 
-    # # ✅ Render pages
-    # pg = st.navigation(pages)
-    # pg.run()
+st.sidebar.success(f"Logged in: {st.session_state.user}")
+# On every page load, check session_token
+if "user" in st.session_state and "session_token" in st.session_state:
+    if not is_user_logged_in(st.session_state.user, st.session_state.session_token):
+        st.warning("You have been logged out because your account was used to log in elsewhere.")
+        del st.session_state.user
+        del st.session_state.session_token
+        st.rerun()
+
+# On logout, clear the session in Supabase
+if st.sidebar.button("Logout"):
+    if "user" in st.session_state:
+        set_user_session(st.session_state.user, active=False)
+        del st.session_state.user
+        if "session_token" in st.session_state:
+            del st.session_state.session_token
+    st.rerun()
+
+# Add Admin Login button to sidebar
+if st.sidebar.button("Admin Login"):
+    st.session_state.show_admin_login = True
+
+# ------------------ Alumni Directory ------------------
+st.title("🎓 JNVK Alumni Directory")
+
+alumni_df = load_users()
+
+st.markdown("#### Browse Alumni (Name, Batch, Profession, Email, Year of Passout)")
+
+# Only show selected fields for privacy
+show_df = alumni_df[["name", "batch", "profession", "email", "year_of_passout"]].sort_values(by=["year_of_passout", "batch", "name"], ascending=[False, True, True])
+st.dataframe(show_df, use_container_width=True)
+
+st.info("You can search, filter, and sort the alumni list above. For privacy, only limited details are shown.")
+
+st.markdown("""
+---
+💬 **For queries or corrections, contact the admin.
+""")

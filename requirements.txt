@@ -8,5 +8,5 @@ typing_extensions==4.13.2
 altair==5.5.0
 requests==2.32.3
 XlsxWriter==3.2.3
-gspread
-oauth2client
+supabase
+validators
