@@ -2,40 +2,50 @@ import streamlit as st
 import base64
 import hashlib
 import pandas as pd
-import os
-from supabase import create_client, Client
 import uuid
+from supabase import create_client, Client
 
 # Supabase configuration
 SUPABASE_URL = st.secrets["supabase"]["url"]
 SUPABASE_KEY = st.secrets["supabase"]["key"]
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# ------------------ Simple User Store ------------------
+# ------------------ Utility ------------------
 def hash_password(pw):
     return hashlib.sha256(pw.encode()).hexdigest()
 
-def save_user(email, password_hash, phone, active=True):
-    # Store email in lowercase for case-insensitive matching
+def get_image_base64(image_path):
+    with open(image_path, "rb") as img_file:
+        return base64.b64encode(img_file.read()).decode()
+
+# ------------------ Supabase Table Setup ------------------
+# Table: alumni_users (id, name, phone, batch, year_of_passout, email, address, profession, password_hash, active)
+# Table: user_sessions_ankur (id, email, session_token, active)
+
+# ------------------ User Management ------------------
+def save_user(name, phone, batch, year, email, address, profession, password_hash, active=True):
     email = email.lower()
-    supabase.table("users").insert({
-        "email": email,
-        "password_hash": password_hash,
+    supabase.table("alumni_users").insert({
+        "name": name,
         "phone": phone,
+        "batch": batch,
+        "year_of_passout": year,
+        "email": email,
+        "address": address,
+        "profession": profession,
+        "password_hash": password_hash,
         "active": active
     }).execute()
 
 def user_exists(email):
-    # Case-insensitive check for email
     email = email.lower()
-    res = supabase.table("users").select("id").eq("email", email).execute()
+    res = supabase.table("alumni_users").select("id").eq("email", email).execute()
     return len(res.data) > 0
 
 def validate_login(email, password):
-    import hashlib
-    pw_hash = hashlib.sha256(password.encode()).hexdigest()
+    pw_hash = hash_password(password)
     email = email.lower()
-    res = supabase.table("users").select("password_hash,active").eq("email", email).execute()
+    res = supabase.table("alumni_users").select("password_hash,active").eq("email", email).execute()
     if not res.data:
         return False, "User not found. Please register."
     user = res.data[0]
@@ -47,28 +57,46 @@ def validate_login(email, password):
 
 def activate_user(email, active=True):
     email = email.lower()
-    supabase.table("users").update({"active": active}).eq("email", email).execute()
+    supabase.table("alumni_users").update({"active": active}).eq("email", email).execute()
 
 def delete_user(email):
     email = email.lower()
-    supabase.table("users").delete().eq("email", email).execute()
+    supabase.table("alumni_users").delete().eq("email", email).execute()
 
 def load_users():
-    res = supabase.table("users").select("email,phone,active").execute()
-    import pandas as pd
+    res = supabase.table("alumni_users").select("name,phone,batch,year_of_passout,email,address,profession,active").execute()
     return pd.DataFrame(res.data)
 
-# ------------------ Utility ------------------
-def get_image_base64(image_path):
-    with open(image_path, "rb") as img_file:
-        return base64.b64encode(img_file.read()).decode()
+# ------------------ Session Management ------------------
+def is_user_logged_in(email, session_token=None):
+    email = email.lower()
+    res = supabase.table("user_sessions_ankur").select("session_token,active").eq("email", email).eq("active", True).execute()
+    if not res.data:
+        return False
+    if session_token:
+        return res.data[0]["session_token"] == session_token
+    return True
+
+def set_user_session(email, active=True, session_token=None):
+    email = email.lower()
+    if active:
+        if not session_token:
+            session_token = str(uuid.uuid4())
+        res = supabase.table("user_sessions_ankur").select("id").eq("email", email).execute()
+        if res.data:
+            session_id = res.data[0]["id"]
+            supabase.table("user_sessions_ankur").update({"active": True, "session_token": session_token}).eq("id", session_id).execute()
+        else:
+            supabase.table("user_sessions_ankur").insert({"email": email, "active": True, "session_token": session_token}).execute()
+        return session_token
+    else:
+        supabase.table("user_sessions_ankur").update({"active": False, "session_token": None}).eq("email", email).execute()
+        return None
 
 # ------------------ UI Config ------------------
-st.set_page_config(page_icon="logo.png", layout="wide")
-
+st.set_page_config(page_title="ANKUR - JNVK Alumni", page_icon="logo.png", layout="wide")
 image_path = "logo.png"
 image_base64 = get_image_base64(image_path)
-
 st.markdown(
     f"""
     <style>
@@ -87,9 +115,9 @@ st.markdown(
     </style>
     <div class="header">
         <img src="data:image/png;base64,{image_base64}" alt="Logo">
-        <h1>CET SELECT</h1>
+        <h1>ANKUR – JNVK Alumni</h1>
     </div>
-    <div class="copyright">© 2025 OptionGuru. All rights reserved.</div>
+    <div class="copyright">© 2025 ANKUR. All rights reserved.</div>
     """,
     unsafe_allow_html=True,
 )
@@ -97,47 +125,21 @@ st.markdown(
 # ------------------ Login/Register UI ------------------
 def is_valid_email(email):
     import re
-    # Simple regex for email validation
     return re.match(r"^[\w\.-]+@[\w\.-]+\.\w+$", email) is not None
 
-# Add a table to track user sessions in Supabase
-
-def is_user_logged_in(email, session_token=None):
-    email = email.lower()
-    res = supabase.table("user_sessions").select("session_token,active").eq("email", email).eq("active", True).execute()
-    if not res.data:
-        return False
-    if session_token:
-        # If a session_token is provided, check if it matches
-        return res.data[0]["session_token"] == session_token
-    return True
-
-def set_user_session(email, active=True, session_token=None):
-    email = email.lower()
-    if active:
-        # Insert or update session to active with a new session_token
-        if not session_token:
-            session_token = str(uuid.uuid4())
-        res = supabase.table("user_sessions").select("id").eq("email", email).execute()
-        if res.data:
-            session_id = res.data[0]["id"]
-            supabase.table("user_sessions").update({"active": True, "session_token": session_token}).eq("id", session_id).execute()
-        else:
-            supabase.table("user_sessions").insert({"email": email, "active": True, "session_token": session_token}).execute()
-        return session_token
-    else:
-        # Set session to inactive and clear session_token
-        supabase.table("user_sessions").update({"active": False, "session_token": None}).eq("email", email).execute()
-        return None
-
-# ------------------ Login/Register UI ------------------
 def login_register_ui():
-    st.title("🔐 User Login / Register")
-    tab1, tab2, tab3 = st.tabs(["🔑 Login", "🆕 Register", "🛡️ Admin Login"])
+    # Load external CSS for styling
+    with open("ankur_style.css") as f:
+        st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
+    # Place tabs directly in the main area for full width
+    tab1, tab2 = st.tabs(["🔑 Login", "🆕 Register"])
     with tab1:
-        username = st.text_input("Email", key="login_user")
-        password = st.text_input("Password", type="password", key="login_pw")
-        if st.button("Login"):
+        st.markdown('<div class="ankur-logo"><img src="data:image/png;base64,' + get_image_base64("logo.png") + '" /></div>', unsafe_allow_html=True)
+        st.markdown('<div class="ankur-title">Welcome to ANKUR</div>', unsafe_allow_html=True)
+        st.markdown('<div class="ankur-sub">JNVK Alumni Portal Login</div>', unsafe_allow_html=True)
+        username = st.text_input("✉️ Email", key="login_user")
+        password = st.text_input("🔒 Password", type="password", key="login_pw")
+        if st.button("Login", key="login_btn"):
             if is_user_logged_in(username) and not is_user_logged_in(username, st.session_state.get("session_token")):
                 st.error("This user is already logged in from another device or session.")
             else:
@@ -150,27 +152,32 @@ def login_register_ui():
                     st.rerun()
                 else:
                     st.error(msg)
+        st.markdown('</div>', unsafe_allow_html=True)
     with tab2:
-        new_email = st.text_input("Email", key="reg_user")
-        new_phone = st.text_input("Phone Number", key="reg_phone")
-        new_password = st.text_input("Choose Password", type="password", key="reg_pw")
-        if st.button("Register"):
+        st.markdown('<div class="ankur-logo"><img src="data:image/png;base64,' + get_image_base64("logo.png") + '" /></div>', unsafe_allow_html=True)
+        st.markdown('<div class="ankur-title">Register for ANKUR</div>', unsafe_allow_html=True)
+        st.markdown('<div class="ankur-sub">Create your alumni account</div>', unsafe_allow_html=True)
+        new_name = st.text_input("👤 Full Name", key="reg_name")
+        new_phone = st.text_input("📱 Phone Number", key="reg_phone")
+        new_batch = st.text_input("🏷️ Batch Number", key="reg_batch")
+        new_year = st.text_input("🎓 Year of Passout", key="reg_year")
+        new_email = st.text_input("✉️ Email", key="reg_user")
+        new_address = st.text_area("🏠 Address", key="reg_address")
+        new_profession = st.text_input("💼 Profession", key="reg_profession")
+        new_password = st.text_input("🔒 Choose Password", type="password", key="reg_pw")
+        if st.button("Register", key="register_btn"):
             if not is_valid_email(new_email):
                 st.error("Please enter a valid email address.")
             elif not new_phone or not new_phone.isdigit() or len(new_phone) < 10:
                 st.error("Please enter a valid phone number.")
             elif user_exists(new_email):
                 st.error("Email already registered.")
-            elif not new_email or not new_password:
-                st.error("Email and password required.")
+            elif not new_name or not new_password or not new_batch or not new_year or not new_profession:
+                st.error("All fields except address are required.")
             else:
-                save_user(new_email, hash_password(new_password), new_phone, active=True)
+                save_user(new_name, new_phone, new_batch, new_year, new_email, new_address, new_profession, hash_password(new_password), active=True)
                 st.success("Registration successful! You can now log in.")
-    with tab3:
-        if st.session_state.get("admin"):
-            admin_panel()
-        else:
-            admin_login_ui()
+        st.markdown('</div>', unsafe_allow_html=True)
 
 # ------------------ Admin Panel ------------------
 ADMIN_USERNAME = st.secrets["admin"]["username"]
@@ -191,7 +198,7 @@ def admin_login_ui():
 def admin_panel():
     st.title("👥 Admin Dashboard")
     df = load_users()
-    st.markdown(f"**Total Registered Users:** {len(df)}")
+    st.markdown(f"**Total Registered Alumni:** {len(df)}")
     act = df[df.active.astype(str).str.lower()=="true"]
     inact = df[df.active.astype(str).str.lower()!="true"]
     st.markdown(f"**• Active:** {len(act)} • **Inactive:** {len(inact)}")
@@ -252,160 +259,20 @@ if st.sidebar.button("Logout"):
 if st.sidebar.button("Admin Login"):
     st.session_state.show_admin_login = True
 
-st.title("🎓 Welcome to KCET College Predictor")
+# ------------------ Alumni Directory ------------------
+st.title("🎓 JNVK Alumni Directory")
 
-@st.cache_data
-def load_cutoff_data():
-    df = pd.read_csv("cleaned_cutoff_data_latest_cs.csv")
-    df.columns = df.columns.str.strip()  # Strip whitespace from column names
-    df["Cutoff Rank"] = pd.to_numeric(df["Cutoff Rank"], errors="coerce")
-    return df
+alumni_df = load_users()
 
-df = load_cutoff_data()
+st.markdown("#### Browse Alumni (Name, Batch, Profession, Email, Year of Passout)")
 
-# ------------------ Category Map ------------------
-category_map = {
-    "GM": "General Merit (Unreserved)", "GMK": "General Merit - Kannada Medium", "GMR": "General Merit - Rural",
-    "1G": "Category 1 - General", "1K": "Category 1 - Kannada Medium", "1R": "Category 1 - Rural",
-    "2AG": "Category 2A - General", "2AK": "Category 2A - Kannada Medium", "2AR": "Category 2A - Rural",
-    "2BG": "Category 2B - General", "2BK": "Category 2B - Kannada Medium", "2BR": "Category 2B - Rural",
-    "3AG": "Category 3A - General", "3AK": "Category 3A - Kannada Medium", "3AR": "Category 3A - Rural",
-    "3BG": "Category 3B - General", "3BK": "Category 3B - Kannada Medium", "3BR": "Category 3B - Rural",
-    "SCG": "SC - General", "SCK": "SC - Kannada Medium", "SCR": "SC - Rural",
-    "STG": "ST - General", "STK": "ST - Kannada Medium", "STR": "ST - Rural",
-}
-category_display = [f"{k} – {v}" for k, v in category_map.items()]
+# Only show selected fields for privacy
+show_df = alumni_df[["name", "batch", "profession", "email", "year_of_passout"]].sort_values(by=["year_of_passout", "batch", "name"], ascending=[False, True, True])
+st.dataframe(show_df, use_container_width=True)
 
-# ------------------ Dropdown Options ------------------
-college_options = sorted(
-    df[['College Code', 'College Name']].drop_duplicates().apply(
-        lambda row: f"{row['College Code']} – {row['College Name']}", axis=1
-    ).tolist()
-)
+st.info("You can search, filter, and sort the alumni list above. For privacy, only limited details are shown.")
 
-branch_options = sorted(
-    df[['Branch Code', 'Branch Name']].drop_duplicates().apply(
-        lambda row: f"{row['Branch Code']} – {row['Branch Name']}", axis=1
-    ).tolist()
-)
-
-location_options = sorted(df['Location'].dropna().unique().tolist())
-
-# ------------------ Tabs ------------------
-tab1, tab2 = st.tabs(["🏫 College & Branch Explorer", "🎯 Rank-Based Prediction"])
-
-# ------------------ TAB 1: Rank-Based ------------------
-with tab1:
-    with st.form("branch_form"):
-        st.markdown("### 🏫 Explore Colleges, Branches, Locations, Categories")
-
-        selected_branches = st.multiselect("💡 Optional: Filter by Branch(es)", branch_options)
-        selected_college = st.selectbox("🏛️ Optional: Filter by College", ["-- Any --"] + college_options)
-        selected_category_display = st.selectbox("🎯 Optional: Filter by Category", ["-- Any --"] + sorted(category_display))
-        selected_locations = st.multiselect("📍 Optional: Filter by Location(s)", location_options)
-
-        branch_submit = st.form_submit_button("🔍 Show Results")
-
-    if branch_submit:
-        filtered_df = df.copy()
-
-        if selected_branches:
-            branch_codes = [b.split(" – ")[0] for b in selected_branches]
-            filtered_df = filtered_df[filtered_df["Branch Code"].isin(branch_codes)]
-
-        if selected_college != "-- Any --":
-            college_code = selected_college.split(" – ")[0]
-            filtered_df = filtered_df[filtered_df["College Code"] == college_code]
-
-        if selected_category_display != "-- Any --":
-            category_code = selected_category_display.split(" – ")[0]
-            filtered_df = filtered_df[filtered_df["Category"] == category_code]
-
-        if selected_locations:
-            filtered_df = filtered_df[filtered_df["Location"].isin(selected_locations)]
-
-        result_df = filtered_df[[
-            'College Code', 'College Name', 'Location',
-            'Branch Code', 'Branch Name',
-            'Category', 'Cutoff Rank'
-        ]].dropna().sort_values(by=["College Code", "Branch Code", "Cutoff Rank"])
-
-        st.subheader("📋 Available Branches and Cutoffs")
-        if not result_df.empty:
-            st.success(f"Found {len(result_df)} matching record(s).")
-            st.dataframe(result_df.reset_index(drop=True))
-        else:
-            st.warning("❌ No matching records found.")
-        
-        # Add contact and contribution message
-        st.markdown("""
+st.markdown("""
 ---
-💬 **Have any queries or need help?** Reach out to me at [sachinvspatil@gmail.com](mailto:sachinvspatil@gmail.com)
-
-🙏 **If this app helped you in your option entry, consider supporting its development!**
-
-**Scan the QR code below to contribute:**
+💬 **For queries or corrections, contact the admin.
 """)
-        st.image("upi_qr.png", width=200, caption="Thank you for your support!")
-
-# ------------------ TAB 2: College & Branch Explorer ------------------
-with tab2:
-    with st.form("rank_form"):
-        st.markdown("### 🔍 Search by Rank + Category")
-
-        col1, col2 = st.columns(2)
-        with col1:
-            rank = st.number_input("📈 Enter your KCET Rank", min_value=1, step=1)
-            selected_college = st.selectbox("🏛️ Optional: Filter by College", ["-- Any --"] + college_options)
-            selected_locations = st.multiselect("📍 Optional: Filter by Location(s)", location_options)
-        with col2:
-            selected_category_display = st.selectbox("🎯 Select your Category", ["-- Any --"] + sorted(category_display))
-            selected_branches = st.multiselect("💡 Optional: Filter by Branch(es)", branch_options)
-
-        submit = st.form_submit_button("🔍 Find Colleges")
-
-    if submit:
-        filtered_df = df.copy()
-        if selected_category_display != "-- Any --":
-            category = selected_category_display.split(" – ")[0]
-            filtered_df = filtered_df[filtered_df["Category"] == category]
-
-        if selected_college != "-- Any --":
-            college_code = selected_college.split(" – ")[0]
-            filtered_df = filtered_df[filtered_df["College Code"] == college_code]
-
-        if selected_branches:
-            branch_codes = [b.split(" – ")[0] for b in selected_branches]
-            filtered_df = filtered_df[filtered_df["Branch Code"].isin(branch_codes)]
-
-        if selected_locations:
-            filtered_df = filtered_df[filtered_df["Location"].isin(selected_locations)]
-
-        tolerance = max(int(rank * 0.15), 500)
-        min_rank = max(rank - tolerance, 1)
-        max_rank = rank + tolerance
-
-        filtered_df = filtered_df[
-            filtered_df["Cutoff Rank"] >= min_rank
-        ]
-        filtered_df = filtered_df[
-            filtered_df["Cutoff Rank"] <= max_rank
-        ]
-
-        st.subheader("🎓 Eligible Colleges and Branches")
-        if not filtered_df.empty:
-            st.success(f"Found {len(filtered_df)} option(s) within ±{tolerance} ranks.")
-            st.dataframe(filtered_df.sort_values(by="Cutoff Rank").reset_index(drop=True))
-        else:
-            st.warning("❌ No eligible colleges found. Try adjusting your filters.")
-        
-        # Add contact and contribution message
-        st.markdown("""
----
-💬 **Have any queries or need help?** Reach out to me at [sachinvspatil@gmail.com](mailto:sachinvspatil@gmail.com)
-
-🙏 **If this app helped you in your option entry, consider supporting its development!**
-
-**Scan the QR code below to contribute:**
-""")
-        st.image("upi_qr.png", width=200, caption="Thank you for your support!")

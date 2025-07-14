@@ -1,6 +1,6 @@
 ---
 applications:
-- name: CollegePredictor
+- name: ANKUR
   buildpack: dicf_python_buildpack_latest
   stack: cflinuxfs4
   health-check-type: none
